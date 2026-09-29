@@ -38,17 +38,27 @@ jobs:
         run: |
           chmod +x gradlew
 
-          # Restore debug keystore from base64 if present
+          # 1. Restore debug keystore from base64 if present
           if [ -f "debug.keystore.base64" ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
-            echo "Debug keystore restored successfully."
+            base64 -d debug.keystore.base64 > debug.keystore 2>/dev/null || true
+            echo "Attempted base64 decode of debug.keystore.base64"
           fi
 
-          # Prepare .env from .env.example for Secrets Gradle Plugin
+          # 2. If debug.keystore is still missing or empty, generate a valid debug keystore
+          if [ ! -s "debug.keystore" ]; then
+            echo "Generating fresh debug.keystore via keytool..."
+            keytool -genkeypair -alias androiddebugkey -keypass android -keystore debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -keyalg RSA -keysize 2048 -validity 10000
+          fi
+
+          echo "Keystore file verification:"
+          ls -la debug.keystore
+
+          # 3. Prepare .env from .env.example for Secrets Gradle Plugin
           if [ ! -f ".env" ] && [ -f ".env.example" ]; then
             cp .env.example .env
             echo ".env created from .env.example."
           fi
+          touch .env
 
       - name: Run Unit & Robolectric Tests
         run: ./gradlew testDebugUnitTest --no-configuration-cache --continue
