@@ -26,11 +26,20 @@ jobs:
           distribution: 'temurin'
           cache: 'gradle'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Accept Android SDK Licenses
+        run: |
+          echo "Android SDK Location: $ANDROID_HOME"
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses 2>/dev/null || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
+
+      - name: Ensure Gradle Wrapper
+        run: |
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper
+          fi
+          chmod +x gradlew
 
       - name: Prepare Keystore and Environment Config
         run: |
@@ -47,10 +56,10 @@ jobs:
           fi
 
       - name: Run Unit & Robolectric Tests
-        run: gradle testDebugUnitTest --continue
+        run: ./gradlew testDebugUnitTest --continue
 
       - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Locate Generated APK
         id: apk_locator
