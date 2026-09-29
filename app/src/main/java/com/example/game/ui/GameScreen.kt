@@ -1,5 +1,17 @@
 package com.example.game.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.runtime.key
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.platform.LocalDensity
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+import com.example.game.model.CandyTile
+import com.example.game.levels.LevelsCatalog
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -96,6 +108,11 @@ fun GameScreen(
     userStats: UserStatsEntity?,
     onBackToMap: () -> Unit
 ) {
+    BackHandler {
+        viewModel.abandonLevel()
+        onBackToMap()
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -119,7 +136,10 @@ fun GameScreen(
             // Deluxe Top HUD
             GameTopBar(
                 uiState = uiState,
-                onBack = onBackToMap
+                onBack = {
+                    viewModel.abandonLevel()
+                    onBackToMap()
+                }
             )
 
             // Star Progress Bar with 3 Star checkpoints
@@ -149,7 +169,7 @@ fun GameScreen(
             }
 
             // Interactive Candy Crush Game Board with Dynamic Screen Shake
-            Box(
+            BoxWithConstraints(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
@@ -157,35 +177,39 @@ fun GameScreen(
                     .padding(vertical = 4.dp),
                 contentAlignment = Alignment.Center
             ) {
-                CandyBoardView(
-                    board = uiState.board,
-                    rows = uiState.currentLevel.rows,
-                    cols = uiState.currentLevel.cols,
-                    onCellClicked = { viewModel.onCellClicked(it) }
-                )
+                val side = if (maxWidth < maxHeight) maxWidth else maxHeight
+                Box(modifier = Modifier.size(side)) {
+                    CandyBoardView(
+                        board = uiState.board,
+                        rows = uiState.currentLevel.rows,
+                        cols = uiState.currentLevel.cols,
+                        onCellClicked = { viewModel.onCellClicked(it) },
+                        onSwipe = { from, to -> viewModel.onSwipe(from, to) }
+                    )
 
-                // Particle explosion layer
-                ParticleCanvas(particles = uiState.particles)
+                    // All effect layers share the exact inner rectangle of the board grid.
+                    Box(modifier = Modifier.fillMaxSize().padding(6.dp)) {
+                        ParticleCanvas(particles = uiState.particles)
+                        LaserBeamsCanvas(
+                            laserBeams = uiState.laserBeams,
+                            rows = uiState.currentLevel.rows,
+                            cols = uiState.currentLevel.cols
+                        )
+                        ShockwavesCanvas(shockwaves = uiState.shockwaves)
+                        FloatingScoresOverlay(
+                            scores = uiState.floatingScores,
+                            rows = uiState.currentLevel.rows,
+                            cols = uiState.currentLevel.cols
+                        )
+                    }
 
-                // Futuristic Quantum Laser Beams
-                LaserBeamsCanvas(
-                    laserBeams = uiState.laserBeams,
-                    rows = uiState.currentLevel.rows,
-                    cols = uiState.currentLevel.cols
-                )
+                    // Arcade Combo Banner
+                    ComboBannerOverlay(banner = uiState.comboBanner)
 
-                // Cosmic Shockwave Rings
-                ShockwavesCanvas(shockwaves = uiState.shockwaves)
-
-                // Floating upward scores (+120, +500)
-                FloatingScoresOverlay(scores = uiState.floatingScores)
-
-                // Arcade Combo Banner
-                ComboBannerOverlay(banner = uiState.comboBanner)
-
-                // Reshuffling Notice
-                if (uiState.isReshuffling) {
-                    ReshufflingOverlay()
+                    // Reshuffling Notice
+                    if (uiState.isReshuffling) {
+                        ReshufflingOverlay()
+                    }
                 }
             }
 
@@ -205,7 +229,13 @@ fun GameScreen(
                     stars = uiState.starsEarned,
                     levelNumber = uiState.currentLevel.levelNumber,
                     playTimeSec = uiState.elapsedPlayTimeSec,
-                    onNextLevel = { viewModel.startLevel(uiState.currentLevel.levelNumber + 1) },
+                    onNextLevel = {
+                        if (uiState.currentLevel.levelNumber < LevelsCatalog.levels.size && !uiState.isBlitzMode) {
+                            viewModel.startLevel(uiState.currentLevel.levelNumber + 1)
+                        } else {
+                            onBackToMap()
+                        }
+                    },
                     onReplay = { viewModel.startLevel(uiState.currentLevel.levelNumber) },
                     onBackToMap = onBackToMap
                 )
@@ -217,8 +247,19 @@ fun GameScreen(
                     extraMovesAvailable = userStats?.extraMoves ?: 0,
                     playTimeSec = uiState.elapsedPlayTimeSec,
                     onUseExtraMoves = { viewModel.activateBooster(BoosterType.EXTRA_MOVES) },
-                    onRetry = { viewModel.startLevel(uiState.currentLevel.levelNumber) },
-                    onBackToMap = onBackToMap
+                    onRetry = {
+                        val livesLeft = userStats?.lives ?: 1
+                        viewModel.confirmFail()
+                        if (livesLeft - 1 > 0) {
+                            viewModel.startLevel(uiState.currentLevel.levelNumber)
+                        } else {
+                            onBackToMap()
+                        }
+                    },
+                    onBackToMap = {
+                        viewModel.confirmFail()
+                        onBackToMap()
+                    }
                 )
             }
             else -> {}
@@ -359,69 +400,94 @@ private fun GameTopBar(
                             color = SugarGoldStar
                         )
                     }
-                } else when (uiState.currentLevel.goalType) {
-                    LevelGoalType.CLEAR_JELLY -> {
-                        Text(text = "🍧 ", fontSize = 16.sp)
-                        Column {
-                            Text(
-                                text = "JELLY",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFFBCFE8)
-                            )
-                            Text(
-                                text = "${uiState.jellyRemaining}",
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Black,
-                                color = CandyPink
-                            )
-                        }
-                    }
-                    LevelGoalType.SCORE -> {
-                        Text(text = "🎯 ", fontSize = 16.sp)
-                        Column {
-                            Text(
-                                text = "GOAL",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Color(0xFFFEF08A)
-                            )
-                            Text(
-                                text = "${uiState.score}/${uiState.currentLevel.targetScore}",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Black,
-                                color = SugarGoldStar
-                            )
-                        }
-                    }
-                    LevelGoalType.COLLECT_CANDIES -> {
-                        uiState.candyGoals.forEach { goal ->
-                            val remaining = (goal.targetCount - goal.currentCount).coerceAtLeast(0)
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 3.dp)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(14.dp)
-                                        .clip(CircleShape)
-                                        .background(goal.type.mainColor)
-                                )
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = "$remaining",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Black,
-                                    color = if (remaining == 0) CandyGreen else Color.White
-                                )
-                            }
-                        }
-                    }
-                    LevelGoalType.CREATE_SPECIALS -> {
-                        Text(text = "⭐ Specials Goal", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = CandyYellow)
+                } else {
+                    val goalList = uiState.currentLevel.goalTypes.toList()
+                    goalList.forEachIndexed { index, goalType ->
+                        if (index > 0) Spacer(modifier = Modifier.width(10.dp))
+                        GoalChipItem(goalType = goalType, uiState = uiState)
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun GoalChipItem(goalType: LevelGoalType, uiState: GameUiState) {
+    when (goalType) {
+        LevelGoalType.CLEAR_JELLY -> {
+            Text(text = "🍧 ", fontSize = 16.sp)
+            Column {
+                Text(text = "JELLY", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFBCFE8))
+                Text(
+                    text = "${uiState.jellyRemaining}",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                    color = if (uiState.jellyRemaining == 0) CandyGreen else CandyPink
+                )
+            }
+        }
+        LevelGoalType.SCORE -> {
+            Text(text = "🎯 ", fontSize = 16.sp)
+            Column {
+                Text(text = "GOAL", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFEF08A))
+                Text(
+                    text = "${uiState.score}/${uiState.currentLevel.targetScore}",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Black,
+                    color = SugarGoldStar
+                )
+            }
+        }
+        LevelGoalType.COLLECT_CANDIES -> {
+            uiState.candyGoals.forEach { goal ->
+                val remaining = (goal.targetCount - goal.currentCount).coerceAtLeast(0)
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 3.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .background(goal.type.mainColor)
+                    )
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = if (remaining == 0) "✓" else "$remaining",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (remaining == 0) CandyGreen else Color.White
+                    )
+                }
+            }
+        }
+        LevelGoalType.CREATE_SPECIALS -> {
+            uiState.specialGoals.forEach { goal ->
+                val remaining = (goal.targetCount - goal.currentCount).coerceAtLeast(0)
+                val icon = when {
+                    goal.specialType == com.example.game.model.SpecialType.COLOR_BOMB -> "🌈"
+                    goal.specialType == com.example.game.model.SpecialType.WRAPPED -> "🎁"
+                    else -> "≡"
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 3.dp)) {
+                    Text(text = icon, fontSize = 15.sp, color = Color.White)
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Text(
+                        text = if (remaining == 0) "✓" else "$remaining",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (remaining == 0) CandyGreen else Color.White
+                    )
+                }
+            }
+        }
+        LevelGoalType.DROP_INGREDIENTS -> {
+            val remaining = (uiState.currentLevel.ingredientTarget - uiState.ingredientsDropped).coerceAtLeast(0)
+            Text(text = "🍒 ", fontSize = 16.sp)
+            Text(
+                text = if (remaining == 0) "✓" else "$remaining",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Black,
+                color = if (remaining == 0) CandyGreen else Color.White
+            )
         }
     }
 }
@@ -635,21 +701,32 @@ private fun SugarCrushModeBanner(remainingMoves: Int) {
     }
 }
 
+private data class BoardTile(
+    val tile: CandyTile,
+    val row: Int,
+    val col: Int,
+    val locked: Boolean,
+    val spawnRow: Int
+)
+
 @Composable
 private fun CandyBoardView(
     board: List<List<Cell>>,
     rows: Int,
     cols: Int,
-    onCellClicked: (Position) -> Unit
+    onCellClicked: (Position) -> Unit,
+    onSwipe: (Position, Position) -> Unit
 ) {
     if (board.isEmpty()) return
+
+    // Tiles we have already shown once: everything else drops in from above the board.
+    val seenIds = remember { HashSet<Long>() }
 
     Card(
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0x88170624)),
         modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(1f)
+            .fillMaxSize()
             .border(3.5.dp, Brush.verticalGradient(listOf(Color(0xFF9333EA), Color(0xFF4C1D95))), RoundedCornerShape(22.dp))
             .shadow(16.dp, RoundedCornerShape(22.dp))
     ) {
@@ -658,96 +735,221 @@ private fun CandyBoardView(
                 .fillMaxSize()
                 .padding(6.dp)
         ) {
+            val density = LocalDensity.current
+            val cellW = maxWidth / cols
+            val cellH = maxHeight / rows
+            val cellPxW = with(density) { cellW.toPx() }
+            val cellPxH = with(density) { cellH.toPx() }
+
+            // 1) Static background: cells, jelly, chocolate
             Column(modifier = Modifier.fillMaxSize()) {
                 for (r in 0 until rows) {
                     Row(modifier = Modifier.weight(1f)) {
                         for (c in 0 until cols) {
-                            val cell = board.getOrNull(r)?.getOrNull(c)
-                            val isPlayable = cell?.isPlayable ?: false
-                            val isAlt = (r + c) % 2 == 0
-
-                            Box(
+                            BoardCellBackground(
+                                cell = board.getOrNull(r)?.getOrNull(c),
+                                isAlt = (r + c) % 2 == 0,
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxSize()
-                                    .padding(1.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (isPlayable) {
-                                            if (isAlt) BoardCellBg else BoardCellAlternate
-                                        } else {
-                                            Color.Transparent
-                                        }
-                                    )
-                                    .then(
-                                        if (isPlayable) {
-                                            Modifier.pointerInput(cell?.position) {
-                                                var totalDx = 0f
-                                                var totalDy = 0f
-                                                var hasTriggeredSwipe = false
-
-                                                detectDragGestures(
-                                                    onDragStart = {
-                                                        totalDx = 0f
-                                                        totalDy = 0f
-                                                        hasTriggeredSwipe = false
-                                                    },
-                                                    onDrag = { change, dragAmount ->
-                                                        change.consume()
-                                                        if (hasTriggeredSwipe) return@detectDragGestures
-                                                        totalDx += dragAmount.x
-                                                        totalDy += dragAmount.y
-
-                                                        val threshold = 32f
-                                                        if (abs(totalDx) > threshold || abs(totalDy) > threshold) {
-                                                            hasTriggeredSwipe = true
-                                                            val targetPos = if (abs(totalDx) > abs(totalDy)) {
-                                                                if (totalDx > 0) Position(r, c + 1) else Position(r, c - 1)
-                                                            } else {
-                                                                if (totalDy > 0) Position(r + 1, c) else Position(r - 1, c)
-                                                            }
-                                                            if (targetPos.row in 0 until rows && targetPos.col in 0 until cols) {
-                                                                onCellClicked(Position(r, c))
-                                                                onCellClicked(targetPos)
-                                                            }
-                                                        }
-                                                    },
-                                                    onDragEnd = {
-                                                        if (!hasTriggeredSwipe) {
-                                                            onCellClicked(Position(r, c))
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                        } else Modifier
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                // Draw Jelly layer if present
-                                if (cell != null && cell.hasJelly) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(
-                                                if (cell.jellyLevel >= 2) Color(0xAAFF1493) else JellyOverlay
-                                            )
-                                            .border(
-                                                1.dp,
-                                                if (cell.jellyLevel >= 2) Color(0xFFFF69B4) else Color(0x77FF69B4),
-                                                RoundedCornerShape(8.dp)
-                                            )
-                                    )
-                                }
-
-                                // Draw Candy with glossy rendering
-                                if (cell?.candy != null) {
-                                    CandyView(tile = cell.candy)
-                                }
-                            }
+                            )
                         }
                     }
                 }
+            }
+
+            // 2) Candy layer: every tile animates from its previous position (swap / fall)
+            val flat = ArrayList<BoardTile>()
+            for (c in 0 until cols) {
+                val newInColumn = ArrayList<Int>()
+                for (r in 0 until rows) {
+                    val cell = board.getOrNull(r)?.getOrNull(c) ?: continue
+                    val tile = cell.candy ?: continue
+                    if (!seenIds.contains(tile.id)) newInColumn.add(r)
+                }
+                val k = newInColumn.size
+                for (r in 0 until rows) {
+                    val cell = board.getOrNull(r)?.getOrNull(c) ?: continue
+                    val tile = cell.candy ?: continue
+                    val idx = newInColumn.indexOf(r)
+                    val spawnRow = if (idx >= 0) -(k - idx) else r
+                    flat.add(BoardTile(tile, r, c, cell.lockLevel > 0, spawnRow))
+                }
+            }
+            SideEffect {
+                flat.forEach { seenIds.add(it.tile.id) }
+                if (seenIds.size > 600) {
+                    val alive = flat.map { it.tile.id }.toHashSet()
+                    seenIds.retainAll(alive)
+                }
+            }
+
+            Box(modifier = Modifier.fillMaxSize().clipToBounds()) {
+                for (item in flat) {
+                    key(item.tile.id) {
+                        AnimatedBoardTile(
+                            item = item,
+                            cellW = cellW,
+                            cellH = cellH,
+                            cellPxW = cellPxW,
+                            cellPxH = cellPxH
+                        )
+                    }
+                }
+            }
+
+            // 3) Touch layer: tap to select, swipe to swap
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(rows, cols, cellPxW, cellPxH) {
+                        detectTapGestures { offset ->
+                            val col = (offset.x / cellPxW).toInt().coerceIn(0, cols - 1)
+                            val row = (offset.y / cellPxH).toInt().coerceIn(0, rows - 1)
+                            onCellClicked(Position(row, col))
+                        }
+                    }
+                    .pointerInput(rows, cols, cellPxW, cellPxH) {
+                        var startRow = 0
+                        var startCol = 0
+                        var totalDx = 0f
+                        var totalDy = 0f
+                        var fired = false
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                startCol = (offset.x / cellPxW).toInt().coerceIn(0, cols - 1)
+                                startRow = (offset.y / cellPxH).toInt().coerceIn(0, rows - 1)
+                                totalDx = 0f
+                                totalDy = 0f
+                                fired = false
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                if (!fired) {
+                                    totalDx += dragAmount.x
+                                    totalDy += dragAmount.y
+                                    val threshold = minOf(cellPxW, cellPxH) * 0.28f
+                                    if (abs(totalDx) > threshold || abs(totalDy) > threshold) {
+                                        fired = true
+                                        val target = if (abs(totalDx) > abs(totalDy)) {
+                                            Position(startRow, if (totalDx > 0) startCol + 1 else startCol - 1)
+                                        } else {
+                                            Position(if (totalDy > 0) startRow + 1 else startRow - 1, startCol)
+                                        }
+                                        if (target.row in 0 until rows && target.col in 0 until cols) {
+                                            onSwipe(Position(startRow, startCol), target)
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+            )
+        }
+    }
+}
+
+@Composable
+private fun BoardCellBackground(cell: Cell?, isAlt: Boolean, modifier: Modifier = Modifier) {
+    val isPlayable = cell?.isPlayable ?: false
+    val isChocolate = cell?.isChocolate ?: false
+    Box(
+        modifier = modifier
+            .padding(1.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(
+                when {
+                    isChocolate -> Color(0xFF5D3A1A)
+                    isPlayable -> if (isAlt) BoardCellBg else BoardCellAlternate
+                    else -> Color.Transparent
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (isChocolate) {
+            Text(text = "🍫", fontSize = 26.sp)
+        }
+        if (cell != null && cell.hasJelly) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (cell.jellyLevel >= 2) Color(0xAAFF1493) else JellyOverlay)
+                    .border(
+                        1.dp,
+                        if (cell.jellyLevel >= 2) Color(0xFFFF69B4) else Color(0x77FF69B4),
+                        RoundedCornerShape(8.dp)
+                    )
+            )
+        }
+    }
+}
+
+@Composable
+private fun AnimatedBoardTile(
+    item: BoardTile,
+    cellW: androidx.compose.ui.unit.Dp,
+    cellH: androidx.compose.ui.unit.Dp,
+    cellPxW: Float,
+    cellPxH: Float
+) {
+    val targetX = item.col * cellPxW
+    val targetY = item.row * cellPxH
+    val offX = remember { Animatable(targetX) }
+    val offY = remember { Animatable(item.spawnRow * cellPxH) }
+
+    LaunchedEffect(item.row, item.col, cellPxW, cellPxH) {
+        val distX = abs(offX.value - targetX) / cellPxW
+        val distY = abs(offY.value - targetY) / cellPxH
+        val dist = maxOf(distX, distY)
+        val duration = (90 + 60 * dist).toInt().coerceIn(90, 560)
+        launch { offX.animateTo(targetX, tween(duration, easing = FastOutSlowInEasing)) }
+        launch { offY.animateTo(targetY, tween(duration, easing = FastOutSlowInEasing)) }
+    }
+
+    val popScale by animateFloatAsState(
+        targetValue = if (item.tile.isClearing) 0f else 1f,
+        animationSpec = tween(190),
+        label = "tile_pop"
+    )
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset(offX.value.roundToInt(), offY.value.roundToInt()) }
+            .size(cellW, cellH)
+            .padding(3.dp)
+            .graphicsLayer {
+                scaleX = popScale
+                scaleY = popScale
+                alpha = popScale
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        val ingredient = item.tile.ingredient
+        if (ingredient != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+                    .background(Brush.radialGradient(listOf(Color(0xFFFFF7ED), Color(0xFFFDBA74)))),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = ingredient.emoji, fontSize = (cellW.value * 0.55f).sp)
+            }
+        } else {
+            CandyView(tile = item.tile)
+        }
+
+        if (item.locked) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0x66000000))
+                    .border(2.5.dp, Color(0xFF111827), RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "🔒", fontSize = (cellW.value * 0.42f).sp)
             }
         }
     }
@@ -890,8 +1092,10 @@ private fun ShockwavesCanvas(shockwaves: List<com.example.game.model.ShockwaveRi
 }
 
 @Composable
-private fun FloatingScoresOverlay(scores: List<FloatingScore>) {
-    Box(modifier = Modifier.fillMaxSize()) {
+private fun FloatingScoresOverlay(scores: List<FloatingScore>, rows: Int, cols: Int) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val boardW = maxWidth
+        val boardH = maxHeight
         scores.forEach { score ->
             var animY by remember(score.id) { mutableFloatStateOf(0f) }
             var alpha by remember(score.id) { mutableFloatStateOf(1f) }
@@ -907,8 +1111,8 @@ private fun FloatingScoresOverlay(scores: List<FloatingScore>) {
             Box(
                 modifier = Modifier
                     .offset(
-                        x = ((score.col + 0.5f) / 8f * 320f).dp,
-                        y = ((score.row + 0.5f) / 8f * 320f + animY).dp
+                        x = boardW * ((score.col + 0.5f) / cols) - 28.dp,
+                        y = boardH * ((score.row + 0.5f) / rows) + animY.dp - 14.dp
                     )
             ) {
                 Text(

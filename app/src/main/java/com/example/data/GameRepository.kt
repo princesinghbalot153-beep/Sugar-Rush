@@ -7,6 +7,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
 class GameRepository(private val gameDao: GameDao) {
+    companion object {
+        const val LIFE_REGEN_MS = 25L * 60L * 1000L
+        const val LIVES_REFILL_COST = 100
+    }
+
 
     val allLevels: Flow<List<LevelProgressEntity>> = gameDao.getAllLevelProgress()
     val userStats: Flow<UserStatsEntity?> = gameDao.getUserStatsFlow()
@@ -27,6 +32,18 @@ class GameRepository(private val gameDao: GameDao) {
             )
         }
         gameDao.insertInitialLevels(initialLevels)
+
+        // Players who finished the old 15-level version must be able to continue into the new levels:
+        // make sure the level right after the furthest completed one is unlocked.
+        var furthestCompleted = 0
+        for (config in LevelsCatalog.levels) {
+            val progress = gameDao.getLevelProgress(config.levelNumber)
+            if (progress != null && progress.isCompleted) furthestCompleted = config.levelNumber
+        }
+        val next = gameDao.getLevelProgress(furthestCompleted + 1)
+        if (next != null && !next.isUnlocked) {
+            gameDao.insertOrUpdateLevelProgress(next.copy(isUnlocked = true))
+        }
     }
 
     suspend fun saveLevelCompletion(
@@ -127,8 +144,10 @@ class GameRepository(private val gameDao: GameDao) {
     suspend fun consumeLife(): Boolean = withContext(Dispatchers.IO) {
         val stats = gameDao.getUserStats() ?: return@withContext true
         if (stats.lives > 0) {
+            // The regen clock only starts when the player drops below the maximum.
+            val timestamp = if (stats.lives >= stats.maxLives) System.currentTimeMillis() else stats.lastLifeRegenTimestamp
             gameDao.insertOrUpdateUserStats(
-                stats.copy(lives = stats.lives - 1)
+                stats.copy(lives = stats.lives - 1, lastLifeRegenTimestamp = timestamp)
             )
             true
         } else {
@@ -136,10 +155,37 @@ class GameRepository(private val gameDao: GameDao) {
         }
     }
 
+    /** Gives back one life every [LIFE_REGEN_MS] until the maximum is reached. */
+    suspend fun regenLives() = withContext(Dispatchers.IO) {
+        val stats = gameDao.getUserStats() ?: return@withContext
+        val now = System.currentTimeMillis()
+        if (stats.lives >= stats.maxLives) {
+            if (stats.lastLifeRegenTimestamp != now && stats.lives > stats.maxLives) {
+                gameDao.insertOrUpdateUserStats(stats.copy(lives = stats.maxLives, lastLifeRegenTimestamp = now))
+            }
+            return@withContext
+        }
+        val gained = ((now - stats.lastLifeRegenTimestamp) / LIFE_REGEN_MS).toInt()
+        if (gained <= 0) return@withContext
+        val newLives = (stats.lives + gained).coerceAtMost(stats.maxLives)
+        val newTimestamp = if (newLives >= stats.maxLives) now else stats.lastLifeRegenTimestamp + gained * LIFE_REGEN_MS
+        gameDao.insertOrUpdateUserStats(stats.copy(lives = newLives, lastLifeRegenTimestamp = newTimestamp))
+    }
+
+    /** Spend coins to refill all lives. Returns false when the player can't afford it. */
+    suspend fun buyLives(cost: Int): Boolean = withContext(Dispatchers.IO) {
+        val stats = gameDao.getUserStats() ?: return@withContext false
+        if (stats.coins < cost) return@withContext false
+        gameDao.insertOrUpdateUserStats(
+            stats.copy(coins = stats.coins - cost, lives = stats.maxLives, lastLifeRegenTimestamp = System.currentTimeMillis())
+        )
+        true
+    }
+
     suspend fun refillLives() = withContext(Dispatchers.IO) {
         val stats = gameDao.getUserStats() ?: return@withContext
         gameDao.insertOrUpdateUserStats(
-            stats.copy(lives = stats.maxLives)
+            stats.copy(lives = stats.maxLives, lastLifeRegenTimestamp = System.currentTimeMillis())
         )
     }
 

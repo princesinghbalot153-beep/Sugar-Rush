@@ -157,11 +157,14 @@ fun LevelPreviewDialog(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = when (level.goalType) {
-                                LevelGoalType.SCORE -> "Reach ${level.targetScore} Points"
-                                LevelGoalType.CLEAR_JELLY -> "Clear ${level.totalJellies} Jelly Tiles"
-                                LevelGoalType.COLLECT_CANDIES -> "Collect target colored candies"
-                                LevelGoalType.CREATE_SPECIALS -> "Create special candies"
+                            text = level.goalTypes.joinToString("\n") { goal ->
+                                when (goal) {
+                                    LevelGoalType.SCORE -> "Reach ${level.targetScore} Points"
+                                    LevelGoalType.CLEAR_JELLY -> "Clear ${level.totalJellies} Jelly Layers"
+                                    LevelGoalType.COLLECT_CANDIES -> "Collect target coloured candies"
+                                    LevelGoalType.CREATE_SPECIALS -> "Create special candies"
+                                    LevelGoalType.DROP_INGREDIENTS -> "Bring ${level.ingredientTarget} ingredients down 🍒"
+                                }
                             },
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,

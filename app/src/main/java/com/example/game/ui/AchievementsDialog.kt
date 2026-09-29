@@ -76,12 +76,12 @@ fun AchievementsDialog(
         AchievementItem(
             id = "star_hunter",
             title = "Master of Stars",
-            description = "Earn 15 Golden Stars across all levels",
+            description = "Earn 45 Golden Stars across all levels",
             iconEmoji = "⭐",
             rewardCoins = 250,
-            currentProgress = totalStars.coerceAtMost(15),
-            maxProgress = 15,
-            isCompleted = totalStars >= 15,
+            currentProgress = totalStars.coerceAtMost(45),
+            maxProgress = 45,
+            isCompleted = totalStars >= 45,
             isClaimed = claimedSet.contains("star_hunter")
         ),
         AchievementItem(
@@ -120,12 +120,12 @@ fun AchievementsDialog(
         AchievementItem(
             id = "grand_sugar_king",
             title = "Sugar Kingdom Sovereign",
-            description = "Complete all 15 campaign levels",
+            description = "Complete all ${com.example.game.levels.LevelsCatalog.levels.size} campaign levels",
             iconEmoji = "👑",
             rewardCoins = 1000,
-            currentProgress = completedLevels.coerceAtMost(15),
-            maxProgress = 15,
-            isCompleted = completedLevels >= 15,
+            currentProgress = completedLevels.coerceAtMost(com.example.game.levels.LevelsCatalog.levels.size),
+            maxProgress = com.example.game.levels.LevelsCatalog.levels.size,
+            isCompleted = completedLevels >= com.example.game.levels.LevelsCatalog.levels.size,
             isClaimed = claimedSet.contains("grand_sugar_king")
         )
     )

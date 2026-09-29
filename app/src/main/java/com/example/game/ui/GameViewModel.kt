@@ -13,7 +13,6 @@ import com.example.data.GameRepository
 import com.example.data.LevelProgressEntity
 import com.example.data.UserStatsEntity
 import com.example.game.audio.SoundEffects
-import com.example.game.engine.MatchDetectionResult
 import com.example.game.engine.MatchEngine
 import com.example.game.levels.LevelsCatalog
 import com.example.game.model.BoosterType
@@ -69,6 +68,7 @@ data class GameUiState(
     val jellyRemaining: Int = 0,
     val candyGoals: List<CandyCollectGoal> = emptyList(),
     val specialGoals: List<SpecialCollectGoal> = emptyList(),
+    val ingredientsDropped: Int = 0,
     val floatingScores: List<FloatingScore> = emptyList(),
     val particles: List<GameParticle> = emptyList(),
     val comboBanner: ComboBanner? = null,
@@ -116,48 +116,48 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
     private var screenShakeJob: Job? = null
     private var playTimeJob: Job? = null
 
+    /** True while the Sugar Crush finale runs: animations are sped up. */
+    private var fastMode = false
+
+    /** Whether the life for the current attempt has already been paid. */
+    private var lifeSpent = false
+
+    /** Chocolate eaten during the current player turn (if 0 at end of turn, chocolate spreads). */
+    private var chocolateEatenThisTurn = 0
+
     init {
         viewModelScope.launch {
             repository.initializeDatabaseIfEmpty()
+            repository.regenLives()
+            while (true) {
+                delay(30_000)
+                repository.regenLives()
+            }
         }
     }
 
-    fun startLevel(levelNumber: Int) {
+    private fun pace(ms: Long): Long = if (fastMode) (ms / 2).coerceAtLeast(60L) else ms
+
+    // ------------------------------------------------------------------------------------------
+    // Level lifecycle
+    // ------------------------------------------------------------------------------------------
+
+    fun buyLives() {
+        viewModelScope.launch { repository.buyLives(GameRepository.LIVES_REFILL_COST) }
+    }
+
+    fun hasLives(): Boolean = (userStats.value?.lives ?: 1) > 0
+
+    private fun cancelJobs() {
         hintJob?.cancel()
         blitzJob?.cancel()
         feverJob?.cancel()
         screenShakeJob?.cancel()
         playTimeJob?.cancel()
+    }
 
-        val config = LevelsCatalog.getLevel(levelNumber)
-        val initialBoard = MatchEngine.generateInitialBoard(config)
-        val initialJellyCount = initialBoard.flatten().count { it.hasJelly }
-
-        _uiState.value = GameUiState(
-            currentLevel = config,
-            board = initialBoard,
-            score = 0,
-            movesLeft = config.maxMoves,
-            selectedPosition = null,
-            isBusy = false,
-            gameStatus = GameStatus.PLAYING,
-            activeBooster = null,
-            starsEarned = 0,
-            jellyRemaining = initialJellyCount,
-            candyGoals = config.candyGoals,
-            specialGoals = config.specialGoals,
-            floatingScores = emptyList(),
-            particles = emptyList(),
-            comboBanner = null,
-            sugarCrushMovesRemaining = 0,
-            isBlitzMode = false,
-            blitzTimeRemainingSec = 120,
-            blitzMultiplier = 1,
-            feverProgress = 0f,
-            isFeverActive = false,
-            elapsedPlayTimeSec = 0
-        )
-
+    private fun startPlayTimer() {
+        playTimeJob?.cancel()
         playTimeJob = viewModelScope.launch {
             while (true) {
                 delay(1000)
@@ -166,16 +166,39 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
 
+    private fun countJellyLayers(board: List<List<Cell>>): Int = board.sumOf { row -> row.sumOf { it.jellyLevel } }
+
+    fun startLevel(levelNumber: Int) {
+        cancelJobs()
+        fastMode = false
+        lifeSpent = false
+        chocolateEatenThisTurn = 0
+
+        val config = LevelsCatalog.getLevel(levelNumber)
+        val initialBoard = MatchEngine.generateInitialBoard(config)
+
+        _uiState.value = GameUiState(
+            currentLevel = config,
+            board = initialBoard,
+            score = 0,
+            movesLeft = config.maxMoves,
+            jellyRemaining = countJellyLayers(initialBoard),
+            candyGoals = config.candyGoals,
+            specialGoals = config.specialGoals,
+            ingredientsDropped = 0
+        )
+
+        startPlayTimer()
         scheduleIdleHint()
     }
 
     fun startBlitzMode() {
-        hintJob?.cancel()
-        blitzJob?.cancel()
-        feverJob?.cancel()
-        screenShakeJob?.cancel()
-        playTimeJob?.cancel()
+        cancelJobs()
+        fastMode = false
+        lifeSpent = true
+        chocolateEatenThisTurn = 0
 
         val blitzConfig = LevelConfig(
             levelNumber = 999,
@@ -195,36 +218,12 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.value = GameUiState(
             currentLevel = blitzConfig,
             board = initialBoard,
-            score = 0,
             movesLeft = 999,
-            selectedPosition = null,
-            isBusy = false,
-            gameStatus = GameStatus.PLAYING,
-            activeBooster = null,
-            starsEarned = 0,
-            jellyRemaining = 0,
-            candyGoals = emptyList(),
-            specialGoals = emptyList(),
-            floatingScores = emptyList(),
-            particles = emptyList(),
-            comboBanner = null,
-            sugarCrushMovesRemaining = 0,
             isBlitzMode = true,
-            blitzTimeRemainingSec = 120,
-            blitzMultiplier = 1,
-            feverProgress = 0f,
-            isFeverActive = false,
-            elapsedPlayTimeSec = 0
+            blitzTimeRemainingSec = 120
         )
 
-        playTimeJob = viewModelScope.launch {
-            while (true) {
-                delay(1000)
-                if (_uiState.value.gameStatus == GameStatus.PLAYING) {
-                    _uiState.update { it.copy(elapsedPlayTimeSec = it.elapsedPlayTimeSec + 1) }
-                }
-            }
-        }
+        startPlayTimer()
 
         blitzJob = viewModelScope.launch {
             while (true) {
@@ -268,6 +267,30 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Called when the player leaves a level mid-game or dismisses the fail screen: a life is lost. */
+    fun abandonLevel() {
+        val state = _uiState.value
+        if (state.isBlitzMode) {
+            cancelJobs()
+            return
+        }
+        if (state.gameStatus == GameStatus.PLAYING || state.gameStatus == GameStatus.LEVEL_FAILED) {
+            spendLifeOnce()
+        }
+        cancelJobs()
+    }
+
+    /** Called from the game-over dialog (retry / back to map). */
+    fun confirmFail() {
+        spendLifeOnce()
+    }
+
+    private fun spendLifeOnce() {
+        if (lifeSpent) return
+        lifeSpent = true
+        viewModelScope.launch { repository.consumeLife() }
+    }
+
     private fun triggerScreenShake() {
         screenShakeJob?.cancel()
         screenShakeJob = viewModelScope.launch {
@@ -300,6 +323,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Hints & selection
+    // ------------------------------------------------------------------------------------------
+
     private fun scheduleIdleHint() {
         hintJob?.cancel()
         hintJob = viewModelScope.launch {
@@ -310,8 +337,9 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { state ->
                 val updatedBoard = state.board.map { row ->
                     row.map { cell ->
-                        if (cell.position == hint.first || cell.position == hint.second) {
-                            cell.copy(candy = cell.candy?.copy(isHinted = true))
+                        val candy = cell.candy
+                        if (candy != null && (cell.position == hint.first || cell.position == hint.second)) {
+                            cell.copy(candy = candy.copy(isHinted = true))
                         } else {
                             cell
                         }
@@ -327,8 +355,25 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { state ->
             val updatedBoard = state.board.map { row ->
                 row.map { cell ->
-                    if (cell.candy?.isHinted == true) {
-                        cell.copy(candy = cell.candy.copy(isHinted = false))
+                    val candy = cell.candy
+                    if (candy != null && candy.isHinted) {
+                        cell.copy(candy = candy.copy(isHinted = false))
+                    } else {
+                        cell
+                    }
+                }
+            }
+            state.copy(board = updatedBoard)
+        }
+    }
+
+    private fun updateCellSelection(pos: Position, selected: Boolean) {
+        _uiState.update { state ->
+            val updatedBoard = state.board.map { row ->
+                row.map { cell ->
+                    val candy = cell.candy
+                    if (cell.row == pos.row && cell.col == pos.col && candy != null) {
+                        cell.copy(candy = candy.copy(isSelected = selected))
                     } else {
                         cell
                     }
@@ -346,20 +391,10 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
         clearHints()
 
-        // Active booster handling
         when (state.activeBooster) {
-            BoosterType.LOLLIPOP_HAMMER -> {
-                applyLollipopHammer(pos)
-                return
-            }
-            BoosterType.COLOR_BOMB -> {
-                applyColorBombBooster(pos)
-                return
-            }
-            BoosterType.FREE_SWITCH -> {
-                handleFreeSwitch(pos)
-                return
-            }
+            BoosterType.LOLLIPOP_HAMMER -> { applyLollipopHammer(pos); return }
+            BoosterType.COLOR_BOMB -> { applyColorBombBooster(pos); return }
+            BoosterType.FREE_SWITCH -> { handleFreeSwitch(pos); return }
             else -> {}
         }
 
@@ -385,311 +420,301 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun updateCellSelection(pos: Position, selected: Boolean) {
-        _uiState.update { state ->
-            val updatedBoard = state.board.map { row ->
-                row.map { cell ->
-                    if (cell.row == pos.row && cell.col == pos.col && cell.candy != null) {
-                        cell.copy(candy = cell.candy.copy(isSelected = selected))
-                    } else {
-                        cell
-                    }
-                }
-            }
-            state.copy(board = updatedBoard)
+    /** Swipe gesture: swap `from` with its neighbour `to` directly (like the real game). */
+    fun onSwipe(from: Position, to: Position) {
+        val state = _uiState.value
+        if (state.isBusy || state.gameStatus != GameStatus.PLAYING) return
+        if (state.activeBooster != null) {
+            onCellClicked(from)
+            return
         }
+        if (!from.isAdjacentTo(to)) return
+        val cellFrom = state.board.getOrNull(from.row)?.getOrNull(from.col) ?: return
+        val cellTo = state.board.getOrNull(to.row)?.getOrNull(to.col) ?: return
+        if (!cellFrom.isPlayable || !cellTo.isPlayable) return
+
+        clearHints()
+        state.selectedPosition?.let { updateCellSelection(it, false) }
+        _uiState.update { it.copy(selectedPosition = null) }
+        performSwap(from, to)
     }
+
+    // ------------------------------------------------------------------------------------------
+    // Turn resolution
+    // ------------------------------------------------------------------------------------------
 
     private fun performSwap(from: Position, to: Position) {
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true) }
 
             val currentBoard = _uiState.value.board
-            val candyFrom = currentBoard[from.row][from.col].candy ?: return@launch
-            val candyTo = currentBoard[to.row][to.col].candy ?: return@launch
+            val candyFrom = currentBoard[from.row][from.col].candy
+            val candyTo = currentBoard[to.row][to.col].candy
+            if (candyFrom == null || candyTo == null) {
+                _uiState.update { it.copy(isBusy = false) }
+                return@launch
+            }
 
             val specialComboCleared = MatchEngine.handleDirectSpecialCombo(from, to, currentBoard)
-            val isValid = specialComboCleared != null || MatchEngine.isValidSwap(from, to, currentBoard)
+            val isValid = MatchEngine.isValidSwap(from, to, currentBoard)
 
-            // Step 1: Animate Swap
+            // Animate the swap
             val swappedBoard = MatchEngine.swapCells(from, to, currentBoard)
             _uiState.update { it.copy(board = swappedBoard) }
             triggerHaptic(HapticType.LIGHT)
             playSound { SoundEffects.playSwap() }
-            delay(220)
+            delay(230)
 
             if (!isValid) {
-                // Return swap back
                 _uiState.update { it.copy(board = currentBoard, isBusy = false) }
                 triggerHaptic(HapticType.ERROR)
                 playSound { SoundEffects.playInvalid() }
+                delay(200)
                 scheduleIdleHint()
                 return@launch
             }
 
-            // Valid move: decrement moves
             _uiState.update { it.copy(movesLeft = (it.movesLeft - 1).coerceAtLeast(0)) }
+            chocolateEatenThisTurn = 0
 
-            // Step 2: Resolve cascades or direct combo
+            var board: List<List<Cell>> = swappedBoard
             if (specialComboCleared != null) {
                 triggerHaptic(HapticType.HEAVY)
                 playSound { SoundEffects.playExplosion() }
-                resolveClearedPositions(specialComboCleared, swappedBoard, cascadeStreak = 1)
+                showComboBanner("Divine!", "Special Combo!", CandyBlue)
+                board = clearStep(board, specialComboCleared, emptyMap(), streak = 1, alreadyExpanded = true, isComboBlast = true)
+                board = cascadeLoop(board, null, null, startStreak = 2)
             } else {
-                resolveMatchesWithCascades(swappedBoard, lastSwapped = to, cascadeStreak = 1)
+                board = cascadeLoop(board, to, from, startStreak = 1)
             }
+
+            endOfTurn(board)
         }
     }
 
-    private suspend fun resolveMatchesWithCascades(
+    /** Repeats detect -> clear -> fall until the board is stable. Returns the settled board. */
+    private suspend fun cascadeLoop(
         initialBoard: List<List<Cell>>,
-        lastSwapped: Position? = null,
-        cascadeStreak: Int = 1
-    ) {
+        swapA: Position?,
+        swapB: Position?,
+        startStreak: Int
+    ): List<List<Cell>> {
         var board = initialBoard
-        var streak = cascadeStreak
-
+        var streak = startStreak
+        var first = true
         while (true) {
-            val detection = MatchEngine.detectMatches(board, lastSwapped)
-            if (detection.matchedPositions.isEmpty()) {
-                break
-            }
+            val detection = MatchEngine.detectMatches(
+                board,
+                if (first) swapA else null,
+                if (first) swapB else null
+            )
+            first = false
+            if (detection.matchedPositions.isEmpty()) break
+            board = clearStep(board, detection.matchedPositions, detection.newSpecialsToSpawn, streak, alreadyExpanded = false)
+            streak++
+        }
+        return board
+    }
 
-            val fullCleared = MatchEngine.expandSpecialDetonations(detection.matchedPositions, board)
-            val baseScore = fullCleared.size * 60
-            val streakMultiplier = when (streak) {
-                1 -> 1
-                2 -> 2
-                3 -> 3
-                else -> 4
-            }
-            val feverMultiplier = if (_uiState.value.isFeverActive) 2 else 1
-            val blitzMult = if (_uiState.value.isBlitzMode) 2 else 1
-            val gainedScore = baseScore * streakMultiplier * feverMultiplier * blitzMult
+    /**
+     * One clear phase: score, effects, pop animation, remove, gravity (+ ingredient exits).
+     * Returns the board after everything has fallen.
+     */
+    private suspend fun clearStep(
+        boardIn: List<List<Cell>>,
+        matchedOrCleared: Set<Position>,
+        newSpecials: Map<Position, Pair<CandyType, SpecialType>>,
+        streak: Int,
+        alreadyExpanded: Boolean,
+        isComboBlast: Boolean = false
+    ): List<List<Cell>> {
+        val level = _uiState.value.currentLevel
+        val fullCleared = if (alreadyExpanded) matchedOrCleared else MatchEngine.expandSpecialDetonations(matchedOrCleared, boardIn)
 
-            val firstCleared = fullCleared.firstOrNull() ?: Position(3, 3)
-            addFloatingScore(gainedScore, firstCleared)
-            spawnParticlesForPositions(fullCleared, board)
+        // ---- score
+        val streakMultiplier = when (streak) { 1 -> 1; 2 -> 2; 3 -> 3; else -> 4 }
+        val feverMultiplier = if (_uiState.value.isFeverActive) 2 else 1
+        val blitzMult = if (_uiState.value.isBlitzMode) 2 else 1
+        val perCandy = if (isComboBlast) 90 else 60
+        val specialBonus = newSpecials.size * 300
+        val gainedScore = (fullCleared.size * perCandy + specialBonus) * streakMultiplier * feverMultiplier * blitzMult
 
-            // Trigger Futuristic Quantum Lasers & Cosmic Shockwaves
-            detection.matchedPositions.forEach { pos ->
-                val candy = board.getOrNull(pos.row)?.getOrNull(pos.col)?.candy
-                if (candy != null) {
-                    when (candy.special) {
-                        SpecialType.HORIZONTAL_STRIPED -> {
-                            spawnLaserBeam(isHorizontal = true, index = pos.row, color = candy.type.mainColor)
-                            playSound { SoundEffects.playQuantumLaser() }
-                        }
-                        SpecialType.VERTICAL_STRIPED -> {
-                            spawnLaserBeam(isHorizontal = false, index = pos.col, color = candy.type.mainColor)
-                            playSound { SoundEffects.playQuantumLaser() }
-                        }
-                        SpecialType.COLOR_BOMB, SpecialType.WRAPPED -> {
-                            val normX = (pos.col + 0.5f) / board[0].size
-                            val normY = (pos.row + 0.5f) / board.size
-                            spawnShockwave(normX, normY, SugarGoldStar)
-                            playSound { SoundEffects.playCosmicShockwave() }
-                            triggerScreenShake()
-                        }
-                        else -> {}
-                    }
+        val anchor = fullCleared.firstOrNull() ?: Position(level.rows / 2, level.cols / 2)
+        addFloatingScore(gainedScore, anchor)
+        spawnParticlesForPositions(fullCleared, boardIn)
+
+        // ---- special effects (lasers / shockwaves) for special candies that go off
+        fullCleared.forEach { pos ->
+            val candy = boardIn[pos.row][pos.col].candy ?: return@forEach
+            if (newSpecials.containsKey(pos)) return@forEach
+            when (candy.special) {
+                SpecialType.HORIZONTAL_STRIPED -> {
+                    spawnLaserBeam(isHorizontal = true, index = pos.row, color = candy.type.mainColor)
+                    playSound { SoundEffects.playQuantumLaser() }
                 }
-            }
-
-            // Blitz Mode bonus seconds
-            if (_uiState.value.isBlitzMode) {
-                _uiState.update { it.copy(blitzTimeRemainingSec = (it.blitzTimeRemainingSec + 3).coerceAtMost(180)) }
-                addFloatingScoreText("+3s Time!", firstCleared, CandyGreen)
-            }
-
-            // Fever Gauge Advancement
-            if (!_uiState.value.isFeverActive) {
-                val newFever = (_uiState.value.feverProgress + (0.12f * streak)).coerceIn(0f, 1f)
-                if (newFever >= 1.0f) {
-                    triggerFeverOverdrive()
-                } else {
-                    _uiState.update { it.copy(feverProgress = newFever) }
+                SpecialType.VERTICAL_STRIPED -> {
+                    spawnLaserBeam(isHorizontal = false, index = pos.col, color = candy.type.mainColor)
+                    playSound { SoundEffects.playQuantumLaser() }
                 }
-            }
-
-            // Track stats
-            viewModelScope.launch {
-                repository.recordMaxCombo(streak)
-                if (detection.newSpecialsToSpawn.values.any { it.second == SpecialType.COLOR_BOMB }) {
-                    repository.recordColorBombDetonation()
+                SpecialType.COLOR_BOMB, SpecialType.WRAPPED -> {
+                    spawnShockwave((pos.col + 0.5f) / level.cols, (pos.row + 0.5f) / level.rows, SugarGoldStar)
+                    playSound { SoundEffects.playCosmicShockwave() }
+                    triggerScreenShake()
                 }
+                else -> {}
             }
+        }
 
-            // Screen shake on heavy combos
-            if (streak >= 3) {
-                triggerScreenShake()
-            }
+        if (_uiState.value.isBlitzMode) {
+            _uiState.update { it.copy(blitzTimeRemainingSec = (it.blitzTimeRemainingSec + 3).coerceAtMost(180)) }
+            addFloatingScoreText("+3s", anchor, CandyGreen)
+        }
 
-            // Dynamic Audio & Juice based on combo length
-            playSound { SoundEffects.playPop(streak) }
+        // ---- fever gauge
+        if (!_uiState.value.isFeverActive && !fastMode) {
+            val newFever = (_uiState.value.feverProgress + (0.12f * streak)).coerceIn(0f, 1f)
+            if (newFever >= 1.0f) triggerFeverOverdrive() else _uiState.update { it.copy(feverProgress = newFever) }
+        }
 
+        viewModelScope.launch {
+            repository.recordMaxCombo(streak)
+            if (newSpecials.values.any { it.second == SpecialType.COLOR_BOMB }) repository.recordColorBombDetonation()
+        }
+
+        if (streak >= 3) triggerScreenShake()
+        playSound { SoundEffects.playPop(streak) }
+        if (!isComboBlast) {
             when (streak) {
                 1 -> triggerHaptic(HapticType.MEDIUM)
-                2 -> {
-                    triggerHaptic(HapticType.HEAVY)
-                    showComboBanner("Sweet!", "2x Multiplier!", CandyYellow)
-                }
-                3 -> {
-                    triggerHaptic(HapticType.HEAVY)
-                    showComboBanner("Tasty!", "3x Cascade Rush!", CandyOrange)
-                }
-                4 -> {
-                    triggerHaptic(HapticType.HEAVY)
-                    showComboBanner("Delicious!", "4x Sugar Frenzy!", CandyPink)
-                }
-                else -> {
-                    triggerHaptic(HapticType.HEAVY)
-                    showComboBanner("Sugar Rush!", "Unstoppable Combo!", CandyPurple)
-                }
+                2 -> { triggerHaptic(HapticType.HEAVY); showComboBanner("Sweet!", "2x Multiplier!", CandyYellow) }
+                3 -> { triggerHaptic(HapticType.HEAVY); showComboBanner("Tasty!", "3x Cascade Rush!", CandyOrange) }
+                4 -> { triggerHaptic(HapticType.HEAVY); showComboBanner("Delicious!", "4x Sugar Frenzy!", CandyPink) }
+                else -> { triggerHaptic(HapticType.HEAVY); showComboBanner("Sugar Rush!", "Unstoppable Combo!", CandyPurple) }
             }
-
-            updateGoalsProgress(fullCleared, detection, board)
-
-            val boardAfterDamage = damageJelliesAndClearCandies(board, fullCleared, detection.newSpecialsToSpawn)
-            _uiState.update { state ->
-                val newScore = state.score + gainedScore
-                val stars = calculateStars(newScore, state.currentLevel)
-                val remainingJellies = boardAfterDamage.flatten().count { it.hasJelly }
-                state.copy(
-                    board = boardAfterDamage,
-                    score = newScore,
-                    starsEarned = stars,
-                    jellyRemaining = remainingJellies
-                )
-            }
-            delay(240)
-
-            val refilledBoard = MatchEngine.applyGravityAndRefill(
-                boardAfterDamage,
-                _uiState.value.currentLevel.availableColors
-            )
-            _uiState.update { it.copy(board = refilledBoard) }
-            board = refilledBoard
-            streak++
-            delay(260)
         }
 
-        checkTurnOutcome(board)
-    }
+        updateGoalsProgress(fullCleared - newSpecials.keys, newSpecials, boardIn)
 
-    private suspend fun resolveClearedPositions(
-        clearedPositions: Set<Position>,
-        currentBoard: List<List<Cell>>,
-        cascadeStreak: Int
-    ) {
-        val fullCleared = MatchEngine.expandSpecialDetonations(clearedPositions, currentBoard)
-        val gainedScore = fullCleared.size * 120 * cascadeStreak
+        // ---- pop animation
+        val popping = MatchEngine.markClearing(boardIn, fullCleared, keep = newSpecials.keys)
+        _uiState.update { it.copy(board = popping) }
+        delay(pace(200))
 
-        val firstCleared = fullCleared.firstOrNull() ?: Position(3, 3)
-        addFloatingScore(gainedScore, firstCleared)
-        spawnParticlesForPositions(fullCleared, currentBoard)
-        showComboBanner("Divine!", "Quantum Blast!", CandyBlue)
-
-        val normX = (firstCleared.col + 0.5f) / currentBoard[0].size
-        val normY = (firstCleared.row + 0.5f) / currentBoard.size
-        spawnShockwave(normX, normY, CandyBlue)
-        triggerScreenShake()
-        playSound { SoundEffects.playQuantumLaser() }
-
-        val boardAfterDamage = damageJelliesAndClearCandies(currentBoard, fullCleared, emptyMap())
+        // ---- actually remove
+        val cleared = MatchEngine.clearPositions(popping, fullCleared, newSpecials)
+        chocolateEatenThisTurn += cleared.chocolateDestroyed
         _uiState.update { state ->
             val newScore = state.score + gainedScore
-            val stars = calculateStars(newScore, state.currentLevel)
-            val remainingJellies = boardAfterDamage.flatten().count { it.hasJelly }
             state.copy(
-                board = boardAfterDamage,
+                board = cleared.board,
                 score = newScore,
-                starsEarned = stars,
-                jellyRemaining = remainingJellies
+                starsEarned = calculateStars(newScore, state.currentLevel),
+                jellyRemaining = countJellyLayers(cleared.board)
             )
         }
-        delay(260)
+        delay(pace(120))
 
-        val refilledBoard = MatchEngine.applyGravityAndRefill(
-            boardAfterDamage,
-            _uiState.value.currentLevel.availableColors
-        )
-        _uiState.update { it.copy(board = refilledBoard) }
-        delay(240)
-
-        resolveMatchesWithCascades(refilledBoard, cascadeStreak = cascadeStreak + 1)
+        // ---- gravity, ingredient exits
+        val settled = settleGravity(cleared.board)
+        delay(pace(320))
+        return settled
     }
 
-    private fun damageJelliesAndClearCandies(
-        board: List<List<Cell>>,
-        clearedPositions: Set<Position>,
-        newSpecials: Map<Position, Pair<CandyType, SpecialType>>
-    ): List<List<Cell>> {
-        val rows = board.size
-        val cols = board[0].size
+    private suspend fun settleGravity(boardIn: List<List<Cell>>): List<List<Cell>> {
+        val level = _uiState.value.currentLevel
+        var board = boardIn
+        var guard = 0
+        while (guard < 6) {
+            guard++
+            val onBoard = MatchEngine.countIngredients(board)
+            val dropped = _uiState.value.ingredientsDropped
+            val budget = (level.ingredientTarget - dropped - onBoard).coerceAtLeast(0)
+            board = MatchEngine.applyGravityAndRefill(
+                board,
+                level.availableColors,
+                ingredientBudget = if (level.goalTypes.contains(LevelGoalType.DROP_INGREDIENTS)) budget else 0,
+                ingredientSpawnCols = level.ingredientSpawnCols
+            )
+            _uiState.update { it.copy(board = board) }
 
-        return List(rows) { r ->
-            List(cols) { c ->
-                val current = board[r][c]
-                val pos = Position(r, c)
-                if (clearedPositions.contains(pos)) {
-                    val newJelly = (current.jellyLevel - 1).coerceAtLeast(0)
-                    val specialToSpawn = newSpecials[pos]
-                    val newCandy = if (specialToSpawn != null) {
-                        CandyTile(type = specialToSpawn.first, special = specialToSpawn.second)
-                    } else {
-                        null
-                    }
-                    current.copy(candy = newCandy, jellyLevel = newJelly)
-                } else {
-                    current
-                }
-            }
+            val (afterExit, exited) = MatchEngine.collectExitedIngredients(board, level)
+            if (exited == 0) break
+            delay(pace(260))
+            addFloatingScoreText("🍒 +$exited", Position(level.rows - 1, level.cols / 2), CandyGreen)
+            playSound { SoundEffects.playChime() }
+            triggerHaptic(HapticType.MEDIUM)
+            board = afterExit
+            _uiState.update { it.copy(board = board, ingredientsDropped = it.ingredientsDropped + exited, score = it.score + 500 * exited) }
+            delay(pace(120))
         }
+        return board
     }
 
     private fun updateGoalsProgress(
-        clearedPositions: Set<Position>,
-        detection: MatchDetectionResult,
+        collected: Set<Position>,
+        newSpecials: Map<Position, Pair<CandyType, SpecialType>>,
         board: List<List<Cell>>
     ) {
         _uiState.update { state ->
-            val clearedColorCounts = mutableMapOf<CandyType, Int>()
-            clearedPositions.forEach { pos ->
+            val colorCounts = mutableMapOf<CandyType, Int>()
+            collected.forEach { pos ->
                 val candy = board[pos.row][pos.col].candy
-                if (candy != null) {
-                    clearedColorCounts[candy.type] = (clearedColorCounts[candy.type] ?: 0) + 1
+                if (candy != null && candy.ingredient == null) {
+                    colorCounts[candy.type] = (colorCounts[candy.type] ?: 0) + 1
                 }
             }
-
             val updatedCandyGoals = state.candyGoals.map { goal ->
-                val collected = clearedColorCounts[goal.type] ?: 0
-                goal.copy(currentCount = goal.currentCount + collected)
+                goal.copy(currentCount = goal.currentCount + (colorCounts[goal.type] ?: 0))
             }
-
             val updatedSpecialGoals = state.specialGoals.map { goal ->
-                val createdCount = detection.newSpecialsToSpawn.values.count { it.second == goal.specialType }
-                goal.copy(currentCount = goal.currentCount + createdCount)
+                val created = newSpecials.values.count { made ->
+                    made.second == goal.specialType || (goal.specialType.isStriped && made.second.isStriped)
+                }
+                goal.copy(currentCount = goal.currentCount + created)
             }
-
             state.copy(candyGoals = updatedCandyGoals, specialGoals = updatedSpecialGoals)
         }
     }
 
-    private fun checkTurnOutcome(finalBoard: List<List<Cell>>) {
-        val state = _uiState.value
+    private fun isLevelWon(state: GameUiState): Boolean {
         val level = state.currentLevel
+        return level.goalTypes.all { goal ->
+            when (goal) {
+                LevelGoalType.SCORE -> state.score >= level.targetScore
+                LevelGoalType.CLEAR_JELLY -> state.jellyRemaining == 0
+                LevelGoalType.COLLECT_CANDIES -> state.candyGoals.all { it.isCompleted }
+                LevelGoalType.CREATE_SPECIALS -> state.specialGoals.all { it.isCompleted }
+                LevelGoalType.DROP_INGREDIENTS -> state.ingredientsDropped >= level.ingredientTarget
+            }
+        }
+    }
+
+    /** Runs after every player action: spread chocolate, check win / lose, reshuffle if stuck. */
+    private suspend fun endOfTurn(boardIn: List<List<Cell>>) {
+        var board = boardIn
+        val level = _uiState.value.currentLevel
+
+        // Chocolate spreads when the player didn't eat any this turn.
+        if (!_uiState.value.isBlitzMode && chocolateEatenThisTurn == 0 &&
+            board.any { row -> row.any { it.isChocolate } }
+        ) {
+            val spread = MatchEngine.spreadChocolate(board)
+            if (spread != null) {
+                board = spread
+                _uiState.update { it.copy(board = board) }
+                playSound { SoundEffects.playInvalid() }
+                delay(250)
+                board = settleGravity(board)
+                board = cascadeLoop(board, null, null, startStreak = 2)
+            }
+        }
+        chocolateEatenThisTurn = 0
+
+        val state = _uiState.value
 
         if (state.isBlitzMode) {
-            val hasMoves = MatchEngine.hasPossibleMoves(finalBoard, level.availableColors)
-            if (!hasMoves) {
-                viewModelScope.launch {
-                    _uiState.update { it.copy(isReshuffling = true) }
-                    delay(500)
-                    val reshuffled = MatchEngine.reshuffleBoard(finalBoard, level.availableColors)
-                    _uiState.update { it.copy(board = reshuffled, isReshuffling = false, isBusy = false) }
-                    scheduleIdleHint()
-                }
+            if (!MatchEngine.hasPossibleMoves(board, level.availableColors)) {
+                reshuffle(board, level.availableColors, banner = false)
             } else {
                 _uiState.update { it.copy(isBusy = false) }
                 scheduleIdleHint()
@@ -697,20 +722,8 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val isWon = when (level.goalType) {
-            LevelGoalType.SCORE -> state.score >= level.targetScore
-            LevelGoalType.CLEAR_JELLY -> state.jellyRemaining == 0
-            LevelGoalType.COLLECT_CANDIES -> state.candyGoals.all { it.isCompleted }
-            LevelGoalType.CREATE_SPECIALS -> state.specialGoals.all { it.isCompleted }
-        }
-
-        if (isWon) {
-            // Initiate Sugar Crush victory finale if remaining moves exist!
-            if (state.movesLeft > 0) {
-                triggerSugarCrushBonus(finalBoard)
-            } else {
-                finalizeLevelVictory(state.score)
-            }
+        if (isLevelWon(state)) {
+            if (state.movesLeft > 0) triggerSugarCrushBonus(board) else finalizeLevelVictory(state.score)
             return
         }
 
@@ -719,96 +732,95 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(gameStatus = GameStatus.LEVEL_FAILED, isBusy = false) }
             triggerHaptic(HapticType.ERROR)
             playSound { SoundEffects.playInvalid() }
-            viewModelScope.launch {
-                repository.consumeLife()
-            }
             return
         }
 
-        val hasMoves = MatchEngine.hasPossibleMoves(finalBoard, level.availableColors)
-        if (!hasMoves) {
-            viewModelScope.launch {
-                _uiState.update { it.copy(isReshuffling = true) }
-                delay(750)
-                val reshuffled = MatchEngine.reshuffleBoard(finalBoard, level.availableColors)
-                _uiState.update { it.copy(board = reshuffled, isReshuffling = false, isBusy = false) }
-                showComboBanner("Reshuffle!", "Fresh Board Mixed In", CandyYellow)
-                scheduleIdleHint()
-            }
+        if (!MatchEngine.hasPossibleMoves(board, level.availableColors)) {
+            reshuffle(board, level.availableColors, banner = true)
         } else {
             _uiState.update { it.copy(isBusy = false) }
             scheduleIdleHint()
         }
     }
 
+    private suspend fun reshuffle(board: List<List<Cell>>, colors: List<CandyType>, banner: Boolean) {
+        _uiState.update { it.copy(isReshuffling = true) }
+        delay(750)
+        val reshuffled = MatchEngine.reshuffleBoard(board, colors)
+        _uiState.update { it.copy(board = reshuffled, isReshuffling = false, isBusy = false) }
+        if (banner) showComboBanner("Reshuffle!", "No moves left - fresh board", CandyYellow)
+        scheduleIdleHint()
+    }
+
     /**
-     * Sugar Crush Victory Finale: detonates remaining moves into explosive bonus points!
+     * Sugar Crush: every leftover move becomes a striped candy that fires, with cascades.
      */
-    private fun triggerSugarCrushBonus(board: List<List<Cell>>) {
+    private fun triggerSugarCrushBonus(startBoard: List<List<Cell>>) {
         viewModelScope.launch {
+            fastMode = true
             _uiState.update {
-                it.copy(
-                    gameStatus = GameStatus.SUGAR_CRUSH_BONUS,
-                    isBusy = true,
-                    sugarCrushMovesRemaining = it.movesLeft
-                )
+                it.copy(gameStatus = GameStatus.SUGAR_CRUSH_BONUS, isBusy = true, sugarCrushMovesRemaining = it.movesLeft)
             }
             showComboBanner("Sugar Crush!", "Bonus Firework Rounds!", SugarGoldStar)
             triggerHaptic(HapticType.VICTORY)
-            delay(1000)
+            delay(900)
 
+            var board = startBoard
             var movesRemaining = _uiState.value.movesLeft
-            var currentBoard = board
-            var totalScore = _uiState.value.score
 
             while (movesRemaining > 0) {
                 movesRemaining--
-                val randomRow = Random.nextInt(0, 8)
-                val randomCol = Random.nextInt(0, 8)
-                val bonusPts = 500
-                totalScore += bonusPts
-
-                val targetPos = Position(randomRow, randomCol)
-                addFloatingScore(bonusPts, targetPos)
-                spawnParticlesForPositions(setOf(targetPos), currentBoard)
-                playSound { SoundEffects.playPop(Random.nextInt(2, 6)) }
-                triggerHaptic(HapticType.MEDIUM)
-
-                val damagedBoard = damageJelliesAndClearCandies(currentBoard, setOf(targetPos), emptyMap())
-                val refilledBoard = MatchEngine.applyGravityAndRefill(
-                    damagedBoard,
-                    _uiState.value.currentLevel.availableColors
-                )
-                currentBoard = refilledBoard
-
+                val candidates = mutableListOf<Position>()
+                for (r in board.indices) for (c in board[0].indices) {
+                    val cell = board[r][c]
+                    val candy = cell.candy
+                    if (cell.isPlayable && candy != null && candy.ingredient == null && cell.lockLevel == 0 &&
+                        candy.special == SpecialType.NONE
+                    ) candidates.add(Position(r, c))
+                }
+                if (candidates.isNotEmpty()) {
+                    val target = candidates.random()
+                    val horizontal = Random.nextBoolean()
+                    board = board.mapIndexed { r, row ->
+                        row.mapIndexed { c, cell ->
+                            val candy = cell.candy
+                            if (r == target.row && c == target.col && candy != null) {
+                                cell.copy(candy = candy.copy(
+                                    special = if (horizontal) SpecialType.HORIZONTAL_STRIPED else SpecialType.VERTICAL_STRIPED
+                                ))
+                            } else cell
+                        }
+                    }
+                    _uiState.update { it.copy(board = board) }
+                    delay(pace(260))
+                    board = clearStep(board, setOf(target), emptyMap(), streak = 1, alreadyExpanded = false)
+                    board = cascadeLoop(board, null, null, startStreak = 2)
+                }
                 _uiState.update { state ->
                     state.copy(
-                        board = currentBoard,
-                        score = totalScore,
                         movesLeft = movesRemaining,
                         sugarCrushMovesRemaining = movesRemaining,
-                        starsEarned = calculateStars(totalScore, state.currentLevel).coerceAtLeast(1)
+                        score = state.score + 1000,
+                        starsEarned = calculateStars(state.score + 1000, state.currentLevel)
                     )
                 }
-                delay(220)
+                playSound { SoundEffects.playPop(Random.nextInt(2, 6)) }
+                delay(pace(150))
             }
 
-            finalizeLevelVictory(totalScore)
+            fastMode = false
+            finalizeLevelVictory(_uiState.value.score)
         }
     }
 
     private fun finalizeLevelVictory(finalScore: Int) {
         playTimeJob?.cancel()
+        hintJob?.cancel()
         val level = _uiState.value.currentLevel
         val stars = calculateStars(finalScore, level).coerceAtLeast(1)
 
         _uiState.update {
-            it.copy(
-                gameStatus = GameStatus.LEVEL_WON,
-                isBusy = false,
-                starsEarned = stars,
-                score = finalScore
-            )
+            it.copy(gameStatus = GameStatus.LEVEL_WON, isBusy = false, starsEarned = stars, score = finalScore)
         }
         triggerHaptic(HapticType.VICTORY)
         playSound { SoundEffects.playVictory() }
@@ -827,34 +839,51 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // ------------------------------------------------------------------------------------------
     // Boosters
+    // ------------------------------------------------------------------------------------------
+
     fun activateBooster(booster: BoosterType) {
         val state = _uiState.value
-        if (state.isBusy || state.gameStatus != GameStatus.PLAYING) return
-        clearHints()
 
         if (booster == BoosterType.EXTRA_MOVES) {
+            val canUse = state.gameStatus == GameStatus.PLAYING && !state.isBusy ||
+                state.gameStatus == GameStatus.LEVEL_FAILED
+            if (!canUse || state.isBlitzMode) return
             viewModelScope.launch {
                 val success = repository.useBooster(booster)
                 if (success) {
-                    _uiState.update { it.copy(movesLeft = it.movesLeft + 5) }
+                    val wasFailed = _uiState.value.gameStatus == GameStatus.LEVEL_FAILED
+                    _uiState.update {
+                        it.copy(movesLeft = it.movesLeft + 5, gameStatus = GameStatus.PLAYING, isBusy = false)
+                    }
+                    if (wasFailed) startPlayTimer()
                     showComboBanner("+5 Moves!", "Extra Turns Added!", CandyGreen)
                     triggerHaptic(HapticType.MEDIUM)
                     playSound { SoundEffects.playPop(3) }
+                    scheduleIdleHint()
                 }
             }
             return
         }
 
+        if (state.isBusy || state.gameStatus != GameStatus.PLAYING) return
+        clearHints()
+
         if (state.activeBooster == booster) {
-            _uiState.update { it.copy(activeBooster = null) }
+            state.freeSwitchFirstPos?.let { updateCellSelection(it, false) }
+            _uiState.update { it.copy(activeBooster = null, freeSwitchFirstPos = null) }
         } else {
-            _uiState.update { it.copy(activeBooster = booster) }
+            _uiState.update { it.copy(activeBooster = booster, freeSwitchFirstPos = null) }
             triggerHaptic(HapticType.LIGHT)
         }
     }
 
     private fun applyLollipopHammer(pos: Position) {
+        val board0 = _uiState.value.board
+        val cell = board0[pos.row][pos.col]
+        if (cell.candy == null || cell.candy.ingredient != null) return
+
         viewModelScope.launch {
             val success = repository.useBooster(BoosterType.LOLLIPOP_HAMMER)
             if (!success) {
@@ -865,32 +894,21 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(activeBooster = null, isBusy = true) }
             triggerHaptic(HapticType.HEAVY)
             playSound { SoundEffects.playExplosion() }
+            chocolateEatenThisTurn = 0
 
-            val board = _uiState.value.board
-            val damagedBoard = damageJelliesAndClearCandies(board, setOf(pos), emptyMap())
-            addFloatingScore(500, pos)
-            spawnParticlesForPositions(setOf(pos), board)
-
-            _uiState.update { state ->
-                val newScore = state.score + 500
-                val remainingJellies = damagedBoard.flatten().count { it.hasJelly }
-                state.copy(
-                    board = damagedBoard,
-                    score = newScore,
-                    jellyRemaining = remainingJellies
-                )
-            }
-            delay(220)
-
-            val refilled = MatchEngine.applyGravityAndRefill(damagedBoard, _uiState.value.currentLevel.availableColors)
-            _uiState.update { it.copy(board = refilled) }
-            delay(200)
-
-            resolveMatchesWithCascades(refilled, cascadeStreak = 1)
+            var board = clearStep(board0, setOf(pos), emptyMap(), streak = 1, alreadyExpanded = false)
+            board = cascadeLoop(board, null, null, startStreak = 2)
+            // Boosters never spend a move, so only check win/fail state.
+            chocolateEatenThisTurn = 1
+            endOfTurn(board)
         }
     }
 
     private fun applyColorBombBooster(pos: Position) {
+        val cell = _uiState.value.board[pos.row][pos.col]
+        val candy = cell.candy ?: return
+        if (candy.ingredient != null) return
+
         viewModelScope.launch {
             val success = repository.useBooster(BoosterType.COLOR_BOMB)
             if (!success) {
@@ -900,12 +918,11 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
 
             _uiState.update { state ->
                 val updatedBoard = state.board.map { row ->
-                    row.map { cell ->
-                        if (cell.row == pos.row && cell.col == pos.col) {
-                            cell.copy(candy = CandyTile(type = CandyType.RED, special = SpecialType.COLOR_BOMB))
-                        } else {
-                            cell
-                        }
+                    row.map { c ->
+                        val t = c.candy
+                        if (c.row == pos.row && c.col == pos.col && t != null) {
+                            c.copy(candy = t.copy(special = SpecialType.COLOR_BOMB))
+                        } else c
                     }
                 }
                 state.copy(board = updatedBoard, activeBooster = null)
@@ -913,6 +930,7 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             showComboBanner("Color Bomb!", "Rainbow Power!", CandyPurple)
             triggerHaptic(HapticType.MEDIUM)
             playSound { SoundEffects.playExplosion() }
+            scheduleIdleHint()
         }
     }
 
@@ -923,19 +941,32 @@ class GameViewModel(application: Application) : AndroidViewModel(application) {
             updateCellSelection(pos, true)
             triggerHaptic(HapticType.LIGHT)
             playSound { SoundEffects.playSwap() }
+        } else if (firstPos == pos) {
+            updateCellSelection(pos, false)
+            _uiState.update { it.copy(freeSwitchFirstPos = null) }
         } else {
             viewModelScope.launch {
                 val success = repository.useBooster(BoosterType.FREE_SWITCH)
                 updateCellSelection(firstPos, false)
                 _uiState.update { it.copy(freeSwitchFirstPos = null, activeBooster = null) }
                 if (success) {
-                    val currentBoard = _uiState.value.board
-                    val swapped = MatchEngine.swapCells(firstPos, pos, currentBoard)
-                    _uiState.update { it.copy(board = swapped, isBusy = true) }
+                    _uiState.update { it.copy(isBusy = true) }
+                    val swapped = MatchEngine.swapCells(firstPos, pos, _uiState.value.board)
+                    _uiState.update { it.copy(board = swapped) }
                     triggerHaptic(HapticType.HEAVY)
                     playSound { SoundEffects.playSwap() }
-                    delay(220)
-                    resolveMatchesWithCascades(swapped, cascadeStreak = 1)
+                    delay(230)
+                    chocolateEatenThisTurn = 0
+                    val combo = MatchEngine.handleDirectSpecialCombo(firstPos, pos, swapped)
+                    var board: List<List<Cell>> = swapped
+                    if (combo != null) {
+                        board = clearStep(board, combo, emptyMap(), streak = 1, alreadyExpanded = true, isComboBlast = true)
+                        board = cascadeLoop(board, null, null, startStreak = 2)
+                    } else {
+                        board = cascadeLoop(board, pos, firstPos, startStreak = 1)
+                    }
+                    chocolateEatenThisTurn = 1
+                    endOfTurn(board)
                 }
             }
         }

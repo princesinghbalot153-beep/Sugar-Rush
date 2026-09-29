@@ -4,7 +4,8 @@ enum class LevelGoalType {
     SCORE,
     CLEAR_JELLY,
     COLLECT_CANDIES,
-    CREATE_SPECIALS
+    CREATE_SPECIALS,
+    DROP_INGREDIENTS
 }
 
 data class CandyCollectGoal(
@@ -26,8 +27,8 @@ data class SpecialCollectGoal(
 data class LevelConfig(
     val levelNumber: Int,
     val name: String,
-    val rows: Int = 8,
-    val cols: Int = 8,
+    val rows: Int = 9,
+    val cols: Int = 9,
     val maxMoves: Int,
     val goalType: LevelGoalType,
     val targetScore: Int,
@@ -40,7 +41,31 @@ data class LevelConfig(
     val candyGoals: List<CandyCollectGoal> = emptyList(),
     val specialGoals: List<SpecialCollectGoal> = emptyList(),
     val availableColors: List<CandyType> = CandyType.entries,
-    val storyDescription: String = ""
+    val storyDescription: String = "",
+    // ---- Candy-Crush style blockers / objectives ----
+    val lockMap: List<Position> = emptyList(),
+    val chocolateMap: List<Position> = emptyList(),
+    val ingredientStart: List<Position> = emptyList(),
+    val ingredientTarget: Int = 0,
+    val ingredientSpawnCols: List<Int> = emptyList(),
+    val extraGoals: Set<LevelGoalType> = emptySet(),
+    val realm: String = ""
 ) {
-    val totalJellies: Int = initialJellyMap.size + (doubleJellyMap.size * 2)
+    /** Every objective that must be satisfied to win (primary goal + extras). */
+    val goalTypes: Set<LevelGoalType> get() = extraGoals + goalType
+
+    val totalJellies: Int = run {
+        val doubles = doubleJellyMap.toSet()
+        val singles = initialJellyMap.toSet() - doubles
+        singles.size + doubles.size * 2
+    }
+
+    /** Bottom-most row of a column that is part of the board (ingredients exit there). -1 if none. */
+    fun exitRow(col: Int): Int {
+        val blocked = blockedCells.toSet()
+        for (r in rows - 1 downTo 0) {
+            if (!blocked.contains(Position(r, col))) return r
+        }
+        return -1
+    }
 }

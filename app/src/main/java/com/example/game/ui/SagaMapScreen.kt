@@ -171,26 +171,34 @@ fun SagaMapScreen(
                                     else -> 10.dp
                                 }
 
-                                if (level.levelNumber == 6) {
-                                    RealmBanner(title = "🍫 GUMMY LAGOON", color = CandyPink)
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                } else if (level.levelNumber == 11) {
-                                    RealmBanner(title = "🏰 ROYAL SUGAR SUMMIT", color = SugarGoldStar)
-                                    Spacer(modifier = Modifier.height(16.dp))
-                                }
-
-                                LevelMapNode(
-                                    level = level,
-                                    isUnlocked = isUnlocked,
-                                    isCurrentTop = isCurrentTop,
-                                    stars = stars,
-                                    xOffset = xOffset,
-                                    onClick = {
-                                        if (isUnlocked) {
-                                            previewLevel = level
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                                    LevelMapNode(
+                                        level = level,
+                                        isUnlocked = isUnlocked,
+                                        isCurrentTop = isCurrentTop,
+                                        stars = stars,
+                                        xOffset = xOffset,
+                                        onClick = {
+                                            if (isUnlocked) {
+                                                previewLevel = level
+                                            }
                                         }
+                                    )
+                                    val realmTitle = LevelsCatalog.realmStarts[level.levelNumber]
+                                    if (realmTitle != null) {
+                                        Spacer(modifier = Modifier.height(20.dp))
+                                        RealmBanner(
+                                            title = realmTitle,
+                                            color = when (level.levelNumber) {
+                                                1 -> CandyGreen
+                                                11 -> CandyPink
+                                                21 -> CandyOrange
+                                                31 -> CandyPurple
+                                                else -> SugarGoldStar
+                                            }
+                                        )
                                     }
-                                )
+                                }
                             }
 
                             item {
