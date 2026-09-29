@@ -1,0 +1,148 @@
+name: Unpack Uploaded Zip
+
+# Kaise use karein:
+#   1. Apna project zip (jaise Sugar-Rush-Upgraded.zip) repo ke ROOT me ya `upload/` folder me upload/commit karo.
+#   2. Ye workflow zip ko unzip karke purani saari files replace kar dega (jo zip me nahi hain wo delete ho jayengi),
+#      zip file hata dega, commit karega aur APK build shuru kar dega.
+#
+# Manual run: Actions tab -> "Unpack Uploaded Zip" -> Run workflow.
+
+on:
+  push:
+    branches: ["main", "master"]
+    paths:
+      - "*.zip"
+      - "upload/*.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # files commit/push karne ke liye
+  actions: write    # unzip ke baad build workflow chalane ke liye
+
+# Ek time par sirf ek unpack chale
+concurrency:
+  group: unpack-zip
+  cancel-in-progress: false
+
+jobs:
+  unpack:
+    name: Unzip and replace project files
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    env:
+      # Ye files/folders kabhi replace ya delete nahi honge (space se alag karke likho).
+      # Agar tumhare repo me koi aur zaroori file hai jo zip me nahi hoti, yaha add kar do.
+      PROTECTED: ".git .github README.md LICENSE debug.keystore debug.keystore.base64"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find the newest uploaded zip
+        id: find
+        run: |
+          best=""
+          bestt=0
+          for f in ./*.zip upload/*.zip; do
+            [ -f "$f" ] || continue
+            f="${f#./}"
+            t=$(git log -1 --format=%ct -- "$f" 2>/dev/null || echo 0)
+            if [ "${t:-0}" -ge "$bestt" ]; then
+              best="$f"
+              bestt="${t:-0}"
+            fi
+          done
+
+          if [ -z "$best" ]; then
+            echo "Koi .zip file nahi mili. Kuch karne ki zaroorat nahi."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Using zip: $best"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          echo "zip=$best" >> "$GITHUB_OUTPUT"
+
+      - name: Extract zip
+        if: steps.find.outputs.found == 'true'
+        id: extract
+        run: |
+          ZIP="${{ steps.find.outputs.zip }}"
+          TMP="$RUNNER_TEMP/unzipped"
+          rm -rf "$TMP"
+          mkdir -p "$TMP"
+          unzip -q "$ZIP" -d "$TMP"
+
+          # macOS/Windows ka kachra hatao
+          rm -rf "$TMP/__MACOSX"
+          find "$TMP" -name ".DS_Store" -delete
+
+          # Agar zip ke andar sirf ek top-level folder hai (jaise Sugar-Rush-main/), to uske andar ghuso
+          SRC="$TMP"
+          count=$(ls -A "$TMP" | wc -l)
+          if [ "$count" -eq 1 ]; then
+            only="$(ls -A "$TMP")"
+            if [ -d "$TMP/$only" ]; then
+              SRC="$TMP/$only"
+            fi
+          fi
+
+          # Safety check: galat zip se poora repo na ud jaye
+          if [ ! -f "$SRC/settings.gradle.kts" ] && [ ! -f "$SRC/settings.gradle" ] && [ ! -d "$SRC/app" ]; then
+            echo "::error::Zip me Android project nahi mila (settings.gradle.kts ya app/ folder missing). Replace cancel kiya."
+            exit 1
+          fi
+
+          echo "Project root inside zip: $SRC"
+          echo "src=$SRC" >> "$GITHUB_OUTPUT"
+
+      - name: Replace old files with new ones
+        if: steps.find.outputs.found == 'true'
+        run: |
+          SRC="${{ steps.extract.outputs.src }}"
+
+          # rsync exclude list banao
+          EXCLUDES=()
+          for p in $PROTECTED; do
+            EXCLUDES+=(--exclude="/$p")
+          done
+          # Zip files ko touch mat karo (unhe niche alag se hatayenge)
+          EXCLUDES+=(--exclude="*.zip" --exclude="/upload/")
+
+          rsync -a --delete "${EXCLUDES[@]}" "$SRC"/ "$GITHUB_WORKSPACE"/
+
+      - name: Remove the uploaded zip
+        if: steps.find.outputs.found == 'true'
+        run: |
+          git rm -f --quiet -- "${{ steps.find.outputs.zip }}" || true
+
+      - name: Commit and push
+        if: steps.find.outputs.found == 'true'
+        id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "Koi change nahi mila."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "Auto-update project from ${{ steps.find.outputs.zip }}"
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # GITHUB_TOKEN se kiya gaya push doosre workflows ko automatically trigger nahi karta,
+      # isliye build ko yaha se manually start karte hain.
+      - name: Start APK build
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build-apk.yml --ref "${{ github.ref_name }}" || echo "build-apk.yml trigger nahi ho paya (Actions tab se manually chala lo)."
