@@ -3,6 +3,10 @@ name: Build Android APK
 on:
   push:
     branches: [ "main", "master" ]
+    # Sirf zip upload hone par build mat chalao; unpack-zip workflow unzip ke baad build khud chalata hai.
+    paths-ignore:
+      - "*.zip"
+      - "upload/*.zip"
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
