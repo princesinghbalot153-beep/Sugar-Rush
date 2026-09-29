@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Left wrapper tail -->
+    <path
+        android:fillColor="#FF5252"
+        android:pathData="M24,54 L12,40 L16,54 L12,68 Z" />
+    <path
+        android:fillColor="#FF8A80"
+        android:pathData="M24,54 L14,46 L18,54 L14,62 Z" />
+
+    <!-- Right wrapper tail -->
+    <path
+        android:fillColor="#FF5252"
+        android:pathData="M84,54 L96,40 L92,54 L96,68 Z" />
+    <path
+        android:fillColor="#FF8A80"
+        android:pathData="M84,54 L94,46 L90,54 L94,62 Z" />
+
+    <!-- Main Candy Body (Shadow) -->
+    <path
+        android:fillColor="#C2185B"
+        android:pathData="M54,26 C72,26 84,38 84,56 C84,72 72,82 54,82 C36,82 24,72 24,56 C24,38 36,26 54,26 Z" />
+
+    <!-- Main Candy Body (Vibrant Red-Pink) -->
+    <path
+        android:fillColor="#E91E63"
+        android:pathData="M54,25 C70,25 82,37 82,54 C82,70 70,81 54,81 C38,81 26,70 26,54 C26,37 38,25 54,25 Z" />
+
+    <!-- Diagonal Swirl Stripes (Yellow & Cyan) -->
+    <path
+        android:fillColor="#FFEB3B"
+        android:pathData="M39,32 C41,29 44,28 47,27 L33,70 C30,68 28,64 27,61 Z" />
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M56,25 C60,25 63,27 66,29 L45,80 C41,80 38,78 35,76 Z" />
+    <path
+        android:fillColor="#FFEB3B"
+        android:pathData="M73,34 C76,37 78,41 80,45 L58,81 C55,80 52,78 49,75 Z" />
+
+    <!-- Specular Highlight / Glossy reflection -->
+    <path
+        android:fillColor="#88FFFFFF"
+        android:pathData="M54,28 C64,28 72,34 74,42 C71,36 63,32 54,32 C43,32 35,38 33,44 C34,35 43,28 54,28 Z" />
+        
+    <!-- Sparkle star on candy -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M66,35 L68,39 L72,40 L68,41 L66,45 L64,41 L60,40 L64,39 Z" />
+</vector>

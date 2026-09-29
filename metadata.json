@@ -1,0 +1,6 @@
+{
+  "name": "Sugar Rush",
+  "description": "Match-3 candy puzzle adventure with cascading combos, special candies, and exciting levels!",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
